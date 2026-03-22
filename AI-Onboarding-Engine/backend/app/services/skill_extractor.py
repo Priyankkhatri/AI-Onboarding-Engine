@@ -167,17 +167,72 @@ def _estimate_level(text: str, skill: str) -> str:
     return "Intermediate"  # Default assumption for listed skills
 
 
-async def extract_skills_openai(text: str, context: str = "resume") -> List[Dict]:
-    """Extract skills using OpenAI API for better accuracy."""
+async def extract_skills_ai(text: str, context: str = "resume") -> List[Dict]:
+    """Extract skills using available AI APIs (OpenAI -> NVIDIA -> Gemini) or fallback to keywords."""
+    
+    # 1. Try OpenAI if configured
     try:
         from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key or api_key == "your_openai_api_key_here":
-            return extract_skills_keyword(text)
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key and openai_key != "your_openai_api_key_here":
+            client = OpenAI(api_key=openai_key)
+            prompt = _get_extraction_prompt(text, context)
+            
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # Cost-effective but powerful
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            result = response.choices[0].message.content.strip()
+            return _parse_json_result(result)
+    except Exception as e:
+        print(f"OpenAI Extraction Error: {e}")
 
-        client = OpenAI(api_key=api_key)
+    # 2. Try NVIDIA NIM if configured (OpenAI-compatible)
+    try:
+        from openai import OpenAI
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
+        if nvidia_key and nvidia_key != "your_nvidia_api_key_here":
+            # NVIDIA NIM hosted endpoints use the OpenAI SDK
+            client = OpenAI(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=nvidia_key
+            )
+            prompt = _get_extraction_prompt(text, context)
+            
+            response = client.chat.completions.create(
+                model="meta/llama-3.1-8b-instruct",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            result = response.choices[0].message.content.strip()
+            return _parse_json_result(result)
+    except Exception as e:
+        print(f"NVIDIA NIM Extraction Error: {e}")
 
-        prompt = f"""Analyze the following {context} text and extract all technical and professional skills.
+    # 3. Try Gemini if configured
+    try:
+        import google.generativeai as genai
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key and gemini_key != "your_gemini_api_key_here":
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            prompt = _get_extraction_prompt(text, context)
+            
+            response = model.generate_content(prompt)
+            result = response.text.strip()
+            return _parse_json_result(result)
+    except Exception as e:
+        print(f"Gemini Extraction Error: {e}")
+
+    # 4. Final Fallback to Keywords
+    return extract_skills_keyword(text)
+
+
+def _get_extraction_prompt(text: str, context: str) -> str:
+    return f"""Analyze the following {context} text and extract all technical and professional skills.
 For each skill, determine:
 1. The exact skill name (use proper casing like "React.js", "Node.js", "AWS")
 2. Proficiency level: "Beginner", "Intermediate", or "Advanced" (based on context clues)
@@ -190,22 +245,23 @@ Text:
 
 Return ONLY valid JSON, no markdown formatting."""
 
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=2000
-        )
 
-        result = response.choices[0].message.content.strip()
-        # Clean up potential markdown formatting
-        if result.startswith("```"):
-            result = result.split("\n", 1)[1]
-            result = result.rsplit("```", 1)[0]
+def _parse_json_result(result: str) -> List[Dict]:
+    # Clean up potential markdown formatting
+    if result.startswith("```"):
+        result = result.split("\n", 1)[1]
+        result = result.rsplit("```", 1)[0]
+    
+    try:
+        return json.loads(result)
+    except json.JSONDecodeError:
+        # If JSON is broken, try a very simple cleanup
+        match = re.search(r'\[.*\]', result, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
 
-        skills = json.loads(result)
-        return skills
 
-    except Exception:
-        # Fallback to keyword extraction
-        return extract_skills_keyword(text)
+# For backward compatibility with existing imports
+async def extract_skills_openai(text: str, context: str = "resume") -> List[Dict]:
+    return await extract_skills_ai(text, context)

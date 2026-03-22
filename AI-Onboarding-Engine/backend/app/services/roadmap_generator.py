@@ -400,50 +400,92 @@ def generate_roadmap(skill_gaps: List[Dict], resume_skills: Optional[List[Dict]]
     return roadmap
 
 
-async def generate_roadmap_openai(skill_gaps: List[Dict], resume_skills: List[Dict] = None) -> List[Dict]:
-    """Generate roadmap using OpenAI for more personalized recommendations."""
-    try:
-        from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key or api_key == "your_openai_api_key_here":
-            return generate_roadmap(skill_gaps, resume_skills)
+async def generate_roadmap_ai(skill_gaps: List[Dict], resume_skills: List[Dict] = None) -> List[Dict]:
+    """Generate roadmap using available AI APIs (OpenAI -> NVIDIA -> Gemini) or fallback to rule-based."""
+    
+    # 1. Use rule-based first to get the structure
+    base_roadmap = generate_roadmap(skill_gaps, resume_skills)
+    if not base_roadmap:
+        return []
 
-        # Use rule-based first, then enhance with OpenAI
-        base_roadmap = generate_roadmap(skill_gaps, resume_skills)
-
-        if not base_roadmap:
-            return []
-
-        client = OpenAI(api_key=api_key)
-
-        topics_list = [step["topic"] for step in base_roadmap]
-
-        prompt = f"""I have a learning roadmap with these topics in order: {json.dumps(topics_list)}
+    topics_list = [step["topic"] for step in base_roadmap]
+    prompt = f"""I have a learning roadmap with these topics in order: {json.dumps(topics_list)}
 
 For each topic, provide a one-sentence personalized learning tip.
 Return a JSON array of strings (one tip per topic, same order).
 Return ONLY valid JSON, no markdown formatting."""
 
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=1000
-        )
+    # 2. Try OpenAI
+    try:
+        from openai import OpenAI
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key and openai_key != "your_openai_api_key_here":
+            client = OpenAI(api_key=openai_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            result = response.choices[0].message.content.strip()
+            tips = _parse_json_result(result)
+            return _apply_tips(base_roadmap, tips)
+    except Exception as e:
+        print(f"OpenAI Roadmap Error: {e}")
 
-        result = response.choices[0].message.content.strip()
-        if result.startswith("```"):
-            result = result.split("\n", 1)[1]
-            result = result.rsplit("```", 1)[0]
+    # 3. Try NVIDIA NIM (OpenAI-compatible)
+    try:
+        from openai import OpenAI
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
+        if nvidia_key and nvidia_key != "your_nvidia_api_key_here":
+            client = OpenAI(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=nvidia_key
+            )
+            response = client.chat.completions.create(
+                model="meta/llama-3.1-8b-instruct",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            result = response.choices[0].message.content.strip()
+            tips = _parse_json_result(result)
+            return _apply_tips(base_roadmap, tips)
+    except Exception as e:
+        print(f"NVIDIA NIM Roadmap Error: {e}")
 
-        tips = json.loads(result)
+    # 4. Try Gemini
+    try:
+        import google.generativeai as genai
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key and gemini_key != "your_gemini_api_key_here":
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            result = response.text.strip()
+            tips = _parse_json_result(result)
+            return _apply_tips(base_roadmap, tips)
+    except Exception as e:
+        print(f"Gemini Roadmap Error: {e}")
 
-        # Enhance descriptions with AI tips
-        for i, step in enumerate(base_roadmap):
-            if i < len(tips):
-                step["description"] = tips[i]
+    # 5. Fallback to rule-based (already generated)
+    return base_roadmap
 
-        return base_roadmap
 
-    except Exception:
-        return generate_roadmap(skill_gaps, resume_skills)
+def _parse_json_result(result: str) -> List[str]:
+    if result.startswith("```"):
+        result = result.split("\n", 1)[1]
+        result = result.rsplit("```", 1)[0]
+    return json.loads(result)
+
+
+def _apply_tips(roadmap: List[Dict], tips: List[str]) -> List[Dict]:
+    for i, step in enumerate(roadmap):
+        if i < len(tips):
+            step["description"] = tips[i]
+    return roadmap
+
+
+# For backward compatibility
+async def generate_roadmap_openai(skill_gaps: List[Dict], resume_skills: List[Dict] = None) -> List[Dict]:
+    return await generate_roadmap_ai(skill_gaps, resume_skills)
